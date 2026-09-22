@@ -10,23 +10,19 @@ const fileListContainer = document.getElementById('file-list-container');
 let pendingFiles = [];
 let convertedFiles = [];
 
-// Drag & Drop
-dropZone.addEventListener('dragover', (e) => {
-    e.preventDefault();
+// Tauri Native Drag & Drop
+listen('tauri://file-drop', event => {
+    dropZone.classList.remove('dragover');
+    const paths = event.payload.filter(p => p.toLowerCase().endsWith('.ifc'));
+    addFiles(paths);
+});
+
+listen('tauri://file-drop-hover', event => {
     dropZone.classList.add('dragover');
 });
 
-dropZone.addEventListener('dragleave', () => {
+listen('tauri://file-drop-cancelled', event => {
     dropZone.classList.remove('dragover');
-});
-
-dropZone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    dropZone.classList.remove('dragover');
-    if (e.dataTransfer.files) {
-        const paths = Array.from(e.dataTransfer.files).map(f => f.path || f.name).filter(p => p.toLowerCase().endsWith('.ifc'));
-        addFiles(paths);
-    }
 });
 
 dropZone.addEventListener('click', async () => {
@@ -135,7 +131,7 @@ btnSave.addEventListener('click', async () => {
                     temp_path: cf.tempPath,
                     new_name: cf.newName
                 })),
-                out_dir: Array.isArray(outDir) ? outDir[0] : outDir
+                outDir: Array.isArray(outDir) ? outDir[0] : outDir
             });
             alert('Dateien erfolgreich gespeichert!');
             convertedFiles = [];
