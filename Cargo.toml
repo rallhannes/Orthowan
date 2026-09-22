@@ -2,6 +2,8 @@
 name = "orthowan"
 version = "0.1.0"
 edition = "2021"
+description = "Orthowan IFC Converter"
+authors = ["Hannes Rall"]
 
 [build-dependencies]
 tauri-build = { version = "1.5", features = [] }
