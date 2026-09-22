@@ -14,3 +14,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rfd = "0.14"
 regex = "1.10"
+
+[features]
+# this feature is used for production builds or when `devPath` points to the filesystem
+# DO NOT REMOVE!!
+custom-protocol = ["tauri/custom-protocol"]
