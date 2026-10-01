@@ -1,5 +1,5 @@
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct Entity {
@@ -10,19 +10,63 @@ pub struct Entity {
 }
 
 pub fn convert_ifc(text: &str) -> Result<(String, usize), String> {
-    let re = Regex::new(r"(?is)(#\d+)\s*=\s*([A-Z0-9_]+)\((.*?)\);").unwrap();
     let mut entities: HashMap<String, Entity> = HashMap::new();
+    let mut entity_ranges: Vec<(usize, usize, String)> = Vec::new();
     
-    for cap in re.captures_iter(text) {
-        entities.insert(
-            cap[1].to_string(),
-            Entity {
-                id: cap[1].to_string(),
-                entity_type: cap[2].to_uppercase(),
-                args: cap[3].to_string(),
-                full: cap[0].to_string(),
+    // Proper manual string literal parser with offset tracking
+    let mut i = 0;
+    let mut last_start = 0;
+    let mut in_str = false;
+    let mut in_comment = false;
+    let mut depth = 0;
+    
+    while i < text.len() {
+        let b = text.as_bytes()[i];
+        
+        if in_comment {
+            if b == b'*' && i + 1 < text.len() && text.as_bytes()[i+1] == b'/' {
+                in_comment = false;
+                i += 1;
             }
-        );
+        } else if !in_str && b == b'/' && i + 1 < text.len() && text.as_bytes()[i+1] == b'*' {
+            in_comment = true;
+            i += 1;
+        } else if b == b'\'' {
+            if in_str && i + 1 < text.len() && text.as_bytes()[i+1] == b'\'' {
+                i += 1; // skip escaped quote
+            } else {
+                in_str = !in_str;
+            }
+        } else if !in_str {
+            if b == b'(' {
+                depth += 1;
+            } else if b == b')' {
+                depth -= 1;
+            } else if b == b';' && depth == 0 {
+                let entity_str = &text[last_start..=i];
+                if let Some(eq_idx) = entity_str.find('=') {
+                    if let Some(paren_idx) = entity_str.find('(') {
+                        let id = entity_str[..eq_idx].trim().to_string();
+                        if id.starts_with('#') {
+                            let end_paren = entity_str.rfind(')').unwrap_or(entity_str.len()-2);
+                            if paren_idx < end_paren {
+                                let type_name = entity_str[eq_idx+1..paren_idx].trim().to_uppercase();
+                                let args = entity_str[paren_idx+1..end_paren].to_string();
+                                entities.insert(id.clone(), Entity {
+                                    id: id.clone(),
+                                    entity_type: type_name,
+                                    args,
+                                    full: entity_str.to_string(),
+                                });
+                                entity_ranges.push((last_start, i + 1, id));
+                            }
+                        }
+                    }
+                }
+                last_start = i + 1;
+            }
+        }
+        i += 1;
     }
     
     if entities.is_empty() {
@@ -42,12 +86,11 @@ pub fn convert_ifc(text: &str) -> Result<(String, usize), String> {
     
     let body_ctx = body_ctx.ok_or("IFC-Body-Kontext wurde nicht gefunden.")?;
 
+    let id_re = Regex::new(r"#(\d+)").unwrap();
     let mut max_id = 0;
-    for id in entities.keys() {
-        if id.starts_with('#') {
-            if let Ok(num) = id[1..].parse::<usize>() {
-                if num > max_id { max_id = num; }
-            }
+    for cap in id_re.captures_iter(text) {
+        if let Ok(num) = cap[1].parse::<usize>() {
+            if num > max_id { max_id = num; }
         }
     }
     
@@ -92,9 +135,10 @@ pub fn convert_ifc(text: &str) -> Result<(String, usize), String> {
         let mut ax = p1[0] - p0[0];
         let mut ay = p1[1] - p0[1];
         let l = (ax * ax + ay * ay).sqrt();
-        if l < 1e-9 { continue; }
+        if l < 1e-4 { continue; } 
         ax /= l; ay /= l;
-        let nx = -ay; let ny = ax;
+        
+        let nx = ay; let ny = -ax;
         
         let mut oa = split_args(&op.args);
         if oa.len() < 7 { continue; }
@@ -124,10 +168,10 @@ pub fn convert_ifc(text: &str) -> Result<(String, usize), String> {
         let mut pts: Vec<Vec<f64>> = extract_refs(&poly.args).iter().filter_map(|id| get_point(&entities, id)).collect();
         if pts.len() > 1 && pts[0].len() == pts[pts.len()-1].len() {
             let mut diff = 0.0;
-            for i in 0..pts[0].len() {
-                diff += (pts[0][i] - pts[pts.len()-1][i]).abs();
+            for j in 0..pts[0].len() {
+                diff += (pts[0][j] - pts[pts.len()-1][j]).abs();
             }
-            if diff < 1e-9 {
+            if diff < 1e-5 {
                 pts.pop();
             }
         }
@@ -136,18 +180,8 @@ pub fn convert_ifc(text: &str) -> Result<(String, usize), String> {
         let height = sargs[3].parse::<f64>().unwrap_or(0.0);
         if height <= 0.0 { continue; }
         
-        let us: Vec<f64> = pts.iter().map(|p| p[0]*ax + p[1]*ay).collect();
-        let vs: Vec<f64> = pts.iter().map(|p| p[0]*nx + p[1]*ny).collect();
-        
-        let u0 = us.iter().cloned().fold(f64::INFINITY, f64::min);
-        let u1 = us.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let v0 = vs.iter().cloned().fold(f64::INFINITY, f64::min);
-        let v1 = vs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        
-        let width = u1 - u0;
-        let depth = v1 - v0;
-        if width <= 1e-8 || depth <= 1e-8 { continue; }
-        
+        let mut old_loc_x = 0.0;
+        let mut old_loc_y = 0.0;
         let mut zbase = 0.0;
         if let Some(old_pos) = entities.get(&sargs[1]) {
             if old_pos.entity_type == "IFCAXIS2PLACEMENT3D" {
@@ -155,6 +189,8 @@ pub fn convert_ifc(text: &str) -> Result<(String, usize), String> {
                 if !rr.is_empty() {
                     if let Some(loc) = get_point(&entities, &rr[0]) {
                         if loc.len() >= 3 {
+                            old_loc_x = loc[0];
+                            old_loc_y = loc[1];
                             zbase = loc[2];
                         }
                     }
@@ -162,11 +198,30 @@ pub fn convert_ifc(text: &str) -> Result<(String, usize), String> {
             }
         }
         
-        let ox = ax * u0 + nx * v0;
-        let oy = ay * u0 + ny * v0;
+        let us: Vec<f64> = pts.iter().map(|p| (p[0] + old_loc_x)*ax + (p[1] + old_loc_y)*ay).collect();
+        let vs: Vec<f64> = pts.iter().map(|p| (p[0] + old_loc_x)*nx + (p[1] + old_loc_y)*ny).collect();
+        
+        let u0 = us.iter().cloned().fold(f64::INFINITY, f64::min);
+        let u1 = us.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let v0 = vs.iter().cloned().fold(f64::INFINITY, f64::min);
+        let v1 = vs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        
+        let width = u1 - u0;
+        let mut depth = v1 - v0;
+        if width <= 1e-3 || depth <= 1e-3 { continue; }
+        
+        
+        let start_v = v0;
+        
+        
+        let ezx = nx;
+        let ezy = ny;
+        
+        let ox = ax * u0 + nx * start_v;
+        let oy = ay * u0 + ny * start_v;
         
         let mut pids = Vec::new();
-        for (x, y) in &[(0.0, 0.0), (width, 0.0), (width, height), (0.0, height), (0.0, 0.0)] {
+        for (x, y) in &[(0.0, -0.01), (width, -0.01), (width, height), (0.0, height), (0.0, -0.01)] {
             let id = nid();
             new_entities.push(format!("{} = IFCCARTESIANPOINT(({},{}));", id, fmt(*x), fmt(*y)));
             pids.push(id);
@@ -179,9 +234,9 @@ pub fn convert_ifc(text: &str) -> Result<(String, usize), String> {
         let loc_id = nid();
         new_entities.push(format!("{} = IFCCARTESIANPOINT(({},{},{}));", loc_id, fmt(ox), fmt(oy), fmt(zbase)));
         let axis_id = nid();
-        new_entities.push(format!("{} = IFCDIRECTION(({},{},0.));", axis_id, fmt(nx), fmt(ny)));
+        new_entities.push(format!("{} = IFCDIRECTION(({},{},0.));", axis_id, fmt(ezx), fmt(ezy))); 
         let ref_id = nid();
-        new_entities.push(format!("{} = IFCDIRECTION(({},{},0.));", ref_id, fmt(ax), fmt(ay)));
+        new_entities.push(format!("{} = IFCDIRECTION(({},{},0.));", ref_id, fmt(ax), fmt(ay))); 
         let pos_id = nid();
         new_entities.push(format!("{} = IFCAXIS2PLACEMENT3D({},{},{});", pos_id, loc_id, axis_id, ref_id));
         let dir_id = nid();
@@ -205,21 +260,22 @@ pub fn convert_ifc(text: &str) -> Result<(String, usize), String> {
     let mut replaced_text = String::new();
     let mut last_end = 0;
     
-    for cap in re.captures_iter(text) {
-        let m = cap.get(0).unwrap();
-        replaced_text.push_str(&text[last_end..m.start()]);
-        
-        let id = cap.get(1).unwrap().as_str();
-        if let Some(rep) = replacements.get(id) {
+    for (start, end, id) in entity_ranges {
+        if let Some(rep) = replacements.get(&id) {
+            replaced_text.push_str(&text[last_end..start]);
             replaced_text.push_str(rep);
-        } else {
-            replaced_text.push_str(m.as_str());
+            replaced_text.push_str("\n");
+            last_end = end;
         }
-        last_end = m.end();
     }
     replaced_text.push_str(&text[last_end..]);
     
-    let idx = replaced_text.to_uppercase().rfind("ENDSEC;").ok_or("IFC-Ende (ENDSEC) wurde nicht gefunden.")?;
+    let marker = "ENDSEC;";
+    let mut end_idx = None;
+    for (idx, _) in replaced_text.match_indices(marker) {
+        end_idx = Some(idx);
+    }
+    let idx = end_idx.ok_or("IFC-Ende (ENDSEC) wurde nicht gefunden.")?;
     
     let out_text = format!("{}\n{}\n{}", &replaced_text[..idx], new_entities.join("\n"), &replaced_text[idx..]);
     
@@ -227,8 +283,32 @@ pub fn convert_ifc(text: &str) -> Result<(String, usize), String> {
 }
 
 fn extract_refs(s: &str) -> Vec<String> {
-    let re = Regex::new(r"#\d+").unwrap();
-    re.find_iter(s).map(|m| m.as_str().to_string()).collect()
+    let mut in_str = false;
+    let mut out = Vec::new();
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\'' {
+            if in_str && i + 1 < chars.len() && chars[i+1] == '\'' {
+                i += 1;
+            } else {
+                in_str = !in_str;
+            }
+        } else if !in_str && chars[i] == '#' {
+            let mut num = String::from("#");
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_ascii_digit() {
+                num.push(chars[j]);
+                j += 1;
+            }
+            if num.len() > 1 {
+                out.push(num);
+            }
+            i = j - 1;
+        }
+        i += 1;
+    }
+    out
 }
 
 fn split_args(s: &str) -> Vec<String> {
@@ -306,10 +386,11 @@ fn wall_axis_points(entities: &HashMap<String, Entity>, wall_id: &str) -> Option
 }
 
 fn fmt(mut x: f64) -> String {
-    if x.abs() < 1e-12 { x = 0.0; }
+    if x.abs() < 1e-10 { x = 0.0; }
     let mut s = format!("{:.10}", x);
     s = s.trim_end_matches('0').to_string();
     if s.ends_with('.') { s.push('0'); }
     if !s.contains('.') { s.push_str(".0"); }
+    if s == "-0.0" { s = "0.0".to_string(); }
     s
 }

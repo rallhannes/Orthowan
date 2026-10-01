@@ -1,6 +1,6 @@
 [package]
 name = "orthowan"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Orthowan IFC Converter"
 authors = ["Hannes Rall"]
